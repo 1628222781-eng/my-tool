@@ -1,0 +1,18 @@
+# 默认配置占位。本仓库当前无运行时配置，仅作目录约定。
+project:
+  name: my-tool
+  domain: 鸿蒙设备协同
+  stage: 训练 / 案例归档
+
+reports:
+  root: docs/reports
+  stages:
+    - 01-discovery
+    - 02-research
+    - 03-requirements
+    - 04-design
+    - 05-build
+    - 06-test
+    - 07-pilot
+    - 08-release
+    - 09-operations
