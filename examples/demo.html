@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>鸿蒙设备协同 · 告警巡检 Demo</title>
+<style>
+  :root{
+    --bg:#1f2329; --panel:#2a2f36; --panel-2:#333942; --line:#3d444d;
+    --text:#e6e8eb; --muted:#8a9099; --accent:#ff7d00;
+    --ok:#00b42a; --warn:#ff7d00; --bad:#f53f3f; --info:#3491fa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text)}
+  header{padding:16px 24px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  header h1{margin:0;font-size:18px;font-weight:600}
+  header .sub{color:var(--muted);font-size:12px;margin-top:2px}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+  button{background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+         padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--muted)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#1f2329;font-weight:600}
+  button.danger{color:var(--bad);border-color:var(--bad)}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px;max-width:1400px;margin:0 auto}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  section h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;
+             margin:0 0 10px;display:flex;justify-content:space-between;align-items:center}
+  .feed,.tickets{display:flex;flex-direction:column;gap:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .card .row{display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .card .meta{color:var(--muted);font-size:12px}
+  .card h3{margin:0 0 6px;font-size:14px}
+  .kv{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 12px;margin-top:8px;
+      padding-top:8px;border-top:1px dashed var(--line);font-size:12px}
+  .kv div b{color:var(--muted);font-weight:400;margin-right:6px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;border:1px solid var(--line)}
+  .pill.on{color:var(--ok);border-color:var(--ok)}
+  .pill.off{color:var(--bad);border-color:var(--bad)}
+  .pill.stale{color:var(--warn);border-color:var(--warn)}
+  .pill.dup{color:var(--muted);background:#3a3f47}
+  .raw{background:#191c20;border-radius:6px;padding:8px 10px;font-size:12px;color:#b8bdc4;
+       margin-top:6px;white-space:pre-wrap}
+  .ticket{border-left:3px solid var(--accent)}
+  .ticket.approved{border-left-color:var(--ok);opacity:.85}
+  .ticket.rejected{border-left-color:var(--bad);opacity:.7}
+  .ticket .actions{display:flex;gap:6px;margin-top:8px}
+  footer{padding:12px 24px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;
+         max-width:1400px;margin:0 auto}
+  footer b{color:var(--bad)}
+  .empty{color:var(--muted);text-align:center;padding:24px;border:1px dashed var(--line);border-radius:8px}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>鸿蒙端边云告警与巡检协同 · Demo</h1>
+    <div class="sub">场景：夜班 · PUMP-017 机房高温告警 &nbsp;|&nbsp; 角色：陈晨（巡检员）/ 顾岚（业务）/ 唐悦（工单）/ 许安（安全）</div>
+  </div>
+  <div class="toolbar">
+    <button onclick="ingestNew()">＋ 模拟新告警</button>
+    <button onclick="ingestDuplicate()">⟳ 模拟断网重连（重复告警）</button>
+    <button onclick="resetDemo()">重置</button>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2><span>① 告警流（系统自动补三要素 + 幂等去重）</span><span id="feedCount"></span></h2>
+    <div class="feed" id="feed"></div>
+  </section>
+
+  <section>
+    <h2><span>② 待审核工单草稿（助手不直接派单）</span><span id="ticketCount"></span></h2>
+    <div class="tickets" id="tickets"></div>
+  </section>
+</main>
+
+<footer>
+  <b>安全红线（许安）：</b>
+  助手只输出建议与待审核草稿，不直接派单、不改设备状态；
+  <b>控制 / OTA / 安全联锁 / 紧急停机不在模型权限内</b>；
+  一例越权即停试点（f42 / f44 / f50 / f52）。
+</footer>
+
+<script>
+/* ---------- 模拟告警源 ---------- */
+let seq = 1;
+const feed = [];        // 已收到的告警
+const tickets = [];     // 待审核草稿
+const seenEventKeys = new Map(); // deviceId+eventId -> ticketId
+
+function now(){ const d=new Date();
+  return d.toTimeString().slice(0,8); }
+
+function makeAlert({device, eventId, level, raw, online, sampleAgoSec, handler}){
+  return {
+    id: seq++,
+    time: now(),
+    device, eventId, level, raw,
+    online,
+    sampleTime: sampleAgoSec==null ? null
+                : new Date(Date.now()-sampleAgoSec*1000).toTimeString().slice(0,8),
+    handler
+  };
+}
+
+function ingestNew(){
+  const pool = [
+    makeAlert({device:"PUMP-017 冷水机组 #3", eventId:"evt-1001", level:"高温",
+      raw:"[群截图] 3号机组轴承温度 78℃，夜班有人在吗？",
+      online:true, sampleAgoSec:25, handler:"陈晨（巡检）"}),
+    makeAlert({device:"AHU-04 新风机", eventId:"evt-1002", level:"滤网压差",
+      raw:"新风机滤网压差越限，请安排更换。",
+      online:true, sampleAgoSec:80, handler:"待分配"}),
+    makeAlert({device:"CHILL-09 冷却塔", eventId:"evt-1003", level:"离线",
+      raw:"冷却塔心跳丢失，最后一次上报是 12 分钟前。",
+      online:false, sampleAgoSec:720, handler:"待分配"}),
+  ];
+  const a = pool[Math.floor(Math.random()*pool.length)];
+  processAlert(a);
+}
+
+function ingestDuplicate(){
+  // 断网重连：和第一条 evt-1001 同 deviceId+eventId
+  const a = makeAlert({device:"PUMP-017 冷水机组 #3", eventId:"evt-1001", level:"高温",
+    raw:"[重发] 3号机组轴承温度 78℃（网络恢复后服务端重投）",
+    online:true, sampleAgoSec:180, handler:"陈晨（巡检）"});
+  processAlert(a);
+}
+
+function processAlert(a){
+  feed.unshift(a);
+  const key = a.device+"|"+a.eventId;
+  if(seenEventKeys.has(key)){
+    a.dupOf = seenEventKeys.get(key); // 幂等命中
+  } else {
+    const tk = {
+      id: "WO-"+String(tickets.length+1).padStart(3,"0"),
+      alert: a,
+      status: "pending" // pending | approved | rejected
+    };
+    tickets.unshift(tk);
+    seenEventKeys.set(key, tk.id);
+  }
+  render();
+}
+
+/* ---------- 渲染 ---------- */
+function badge(online, sampleTime){
+  if(!online) return `<span class="pill off">● 设备离线 · 最后上报 ${sampleTime}</span>`;
+  // 演示用：采样时间距今 >5 分钟按"未同步"标黄（f13：离线/陈旧不能假装最新）
+  const [h,m,s] = sampleTime.split(":").map(Number);
+  const now = new Date();
+  const sample = new Date(now); sample.setHours(h,m,s);
+  const ageSec = Math.max(0,(now - sample)/1000);
+  if(ageSec > 300) return `<span class="pill stale">● 在线但采样陈旧（${Math.round(ageSec/60)} 分钟前）</span>`;
+  return `<span class="pill on">● 在线 · 采样于 ${sampleTime}</span>`;
+}
+
+function render(){
+  // feed
+  const f = document.getElementById("feed");
+  f.innerHTML = feed.map(a=>`
+    <div class="card">
+      <div class="row">
+        <h3>${a.device} <span class="pill" style="color:var(--warn)">${a.level}</span></h3>
+        <span class="meta">${a.time} · ${a.id}</span>
+      </div>
+      <div class="raw">${a.raw}</div>
+      <div class="kv">
+        <div><b>采样时间</b>${a.sampleTime ?? '<span class="pill dup">未携带</span>'}</div>
+        <div><b>在线状态</b>${badge(a.online, a.sampleTime)}</div>
+        <div><b>当前处理人</b>${a.handler}</div>
+        <div><b>幂等键</b><code>${a.device.split(' ')[0]} / ${a.eventId}</code></div>
+      </div>
+      ${a.dupOf ? `<div style="margin-top:8px"><span class="pill dup">↳ 同一事件已合并到 ${a.dupOf}，不再开新单（f34/f35）</span></div>` : ""}
+    </div>
+  `).join("") || `<div class="empty">暂无告警</div>`;
+  document.getElementById("feedCount").textContent = feed.length+" 条";
+
+  // tickets
+  const t = document.getElementById("tickets");
+  t.innerHTML = tickets.map(tk=>{
+    const a = tk.alert;
+    let actions = "";
+    if(tk.status==="pending"){
+      actions = `<div class="actions">
+        <button class="primary" onclick="decide('${tk.id}','approved')">✓ 通过（提交到现有工单系统）</button>
+        <button class="danger" onclick="decide('${tk.id}','rejected')">✗ 驳回</button>
+      </div>`;
+    } else if(tk.status==="approved"){
+      actions = `<div class="meta">已提交 · 状态：<b style="color:var(--ok)">待现场接单</b>（助手不自动复机 f53）</div>`;
+    } else {
+      actions = `<div class="meta">已驳回 · 原因记录归档</div>`;
+    }
+    return `<div class="card ticket ${tk.status}">
+      <div class="row"><h3>${tk.id} · ${a.device}</h3><span class="meta">${a.time}</span></div>
+      <div class="meta">建议动作：巡检员赴现场核对轴承温度并拍照回传；<b>不</b>自动降载、<b>不</b>远程停机。</div>
+      ${actions}
+    </div>`;
+  }).join("") || `<div class="empty">暂无待审核草稿</div>`;
+  document.getElementById("ticketCount").textContent = tickets.length+" 张";
+}
+
+function decide(id, status){
+  const tk = tickets.find(x=>x.id===id);
+  if(tk){ tk.status = status; render(); }
+}
+
+function resetDemo(){
+  feed.length = 0; tickets.length = 0; seenEventKeys.clear(); seq = 1;
+  // 预置两条：一条新告警 + 一条重连发出来的重复
+  processAlert(makeAlert({device:"PUMP-017 冷水机组 #3", eventId:"evt-1001", level:"高温",
+    raw:"[群截图] 3号机组轴承温度 78℃，夜班有人在吗？",
+    online:true, sampleAgoSec:25, handler:"陈晨（巡检）"}));
+  processAlert(makeAlert({device:"CHILL-09 冷却塔", eventId:"evt-1003", level:"离线",
+    raw:"冷却塔心跳丢失，最后一次上报是 12 分钟前。",
+    online:false, sampleAgoSec:720, handler:"待分配"}));
+}
+
+resetDemo();
+</script>
+</body>
+</html>
